@@ -596,20 +596,6 @@ input[type=date],input[type=number]{-webkit-appearance:none;}
   <div class="modal-actions"><button class="btn btn-outline" onclick="closeModal('modal-nacimiento')">Cancelar</button><button class="btn btn-pink" onclick="saveNacimiento()">Registrar</button></div>
 </div></div>
 
-<div class="modal-overlay" id="modal-gasto-lote"><div class="modal" style="max-width:460px;">
-  <div class="modal-title"><i class="ti ti-coins"></i> Agregar gasto al lote</div>
-  <div id="gl-info" class="alert-box alert-info" style="margin-bottom:12px;"></div>
-  <div class="form-grid">
-    <div class="form-group"><label>Fecha</label><input type="date" id="gl-fecha"></div>
-    <div class="form-group"><label>Monto (COP)</label><input type="number" id="gl-monto" oninput="calcGastoLote()"></div>
-    <div class="form-group form-full"><label>Concepto / detalle</label><input type="text" id="gl-concepto" placeholder="Ej: Vacuna aftosa, sal mineralizada, transporte"></div>
-    <div class="form-group form-full"><label>Notas (opcional)</label><textarea id="gl-notas"></textarea></div>
-    <div class="form-group form-full" id="gl-calc" style="background:var(--fill-tertiary);padding:12px;border-radius:10px;font-size:13px;color:var(--label-secondary);"></div>
-  </div>
-  <div id="gl-historial"></div>
-  <div class="modal-actions"><button class="btn btn-outline" onclick="closeModal('modal-gasto-lote')">Cancelar</button><button class="btn btn-primary" onclick="saveGastoLote()">Agregar gasto</button></div>
-</div></div>
-
 <div class="modal-overlay" id="modal-destetar"><div class="modal" style="max-width:440px;">
   <div class="modal-title"><i class="ti ti-arrow-fork"></i> Destetar terneros</div>
   <div class="alert-box alert-info"><i class="ti ti-info-circle alert-icon"></i> El ternero pasa a ser cabeza independiente del lote en subcategoría <strong>"Ganado desteto"</strong>, con costo $0.</div>
@@ -699,11 +685,16 @@ input[type=date],input[type=number]{-webkit-appearance:none;}
     </div>
     <div class="form-group"><label>Fecha</label><input type="date" id="g-fecha"></div>
     <div class="form-group"><label>Categoría</label><select id="g-cat" onchange="onChangeGastoCat()"></select></div>
-    <div class="form-group form-full" id="g-lote-wrap"><label>Asociar a lote</label><select id="g-lote"></select></div>
-    <div class="form-group"><label>Monto (COP)</label><input type="number" id="g-monto"></div>
+    <div class="form-group form-full" id="g-lote-wrap"><label>Asociar a lote</label><select id="g-lote" onchange="updateGastoBaseUI()"></select></div>
+    <div class="form-group form-full" id="g-base-wrap" style="display:none;">
+      <div class="toggle-row"><div><div class="toggle-label-t">Sumar al costo base del lote</div><div class="toggle-sub">Reparte el monto entre las cabezas activas y sube el costo por cabeza (para liquidar la ganancia)</div></div><label class="tw"><input type="checkbox" id="g-base-toggle" onchange="updateGastoBaseUI()"><span class="ts"></span></label></div>
+      <div id="g-base-hint" style="font-size:12px;color:var(--label-secondary);margin-top:6px;"></div>
+    </div>
+    <div class="form-group"><label>Monto (COP)</label><input type="number" id="g-monto" oninput="updateGastoBaseUI()"></div>
     <div class="form-group"><label>Proveedor / detalle</label><input type="text" id="g-proveedor"></div>
     <div class="form-group form-full"><label>Número de factura (opcional)</label><input type="text" id="g-factura" placeholder="Ej: 66369"></div>
     <div class="form-group form-full"><label>Notas</label><textarea id="g-notas"></textarea></div>
+    <div class="form-full" id="g-pago-section"><div class="form-grid">
     <div class="sec-div">Estado de pago</div>
     <div class="form-group"><label>Estado</label>
       <select id="g-estado" onchange="onChangeEstadoPago()"><option value="pagado">Pagado</option><option value="pendiente">Pendiente de pago</option></select>
@@ -717,6 +708,7 @@ input[type=date],input[type=number]{-webkit-appearance:none;}
         <button type="button" class="btn-sm" onclick="setPlazo(45)">+45 días</button>
       </div>
     </div>
+    </div></div>
   </div>
   <div class="modal-actions"><button class="btn btn-outline" onclick="closeModal('modal-gasto')">Cancelar</button><button class="btn btn-primary" id="g-save-btn" onclick="saveGasto()">Guardar gasto</button></div>
 </div></div>
@@ -1005,8 +997,7 @@ const MODAL_SAVE={
   'modal-lote':'saveLote','modal-vp':'saveVP','modal-pesaje':'savePesaje','modal-gasto':'saveGasto',
   'modal-inversion':'saveInversion','modal-finca':'saveFinca','modal-nacimiento':'saveNacimiento',
   'modal-reclas':'saveReclas','modal-destetar':'saveDestete','modal-newcat':'confirmNewCat',
-  'modal-newsubcat':'confirmNewSubcat','modal-vendedor':'saveVendedor','modal-abono':'guardarAbono',
-  'modal-gasto-lote':'saveGastoLote'
+  'modal-newsubcat':'confirmNewSubcat','modal-vendedor':'saveVendedor','modal-abono':'guardarAbono'
 };
 let modalDirty={};
 let closeModalTarget=null,closeModalSaveFn=null;
@@ -2383,70 +2374,23 @@ window.deletePesaje=function(id){
   confirmDialog('¿Eliminar pesaje?','Esta acción no se puede deshacer.',async()=>{await deleteDoc(doc(db,'pesajes',id));toast('Pesaje eliminado');},'Eliminar');
 };
 
-// ============== GASTO ADICIONAL POR LOTE (inversión extra al capital, sube costo/cabeza) ==============
-let gastoLoteId=null;
-window.openGastoLoteModal=function(loteId){
-  const l=DB.lotes.find(x=>x.id===loteId);if(!l)return;
-  gastoLoteId=loteId;
-  document.getElementById('gl-fecha').value=td();
-  document.getElementById('gl-monto').value='';
-  document.getElementById('gl-concepto').value='';
-  document.getElementById('gl-notas').value='';
-  const cabAct=loteCabezasActuales(l);
-  document.getElementById('gl-info').innerHTML=`Lote <strong>${l.nombre}</strong> · <strong>${cabAct}</strong> cabeza(s) activas hoy. El gasto se suma al capital invertido y se reparte en partes iguales entre ellas, subiendo el costo por cabeza.`;
-  renderGastoLoteHistorial(l);
-  window.calcGastoLote();
-  modalDirty['modal-gasto-lote']=false;
-  document.getElementById('modal-gasto-lote').classList.add('open');
-};
-window.calcGastoLote=function(){
-  const l=DB.lotes.find(x=>x.id===gastoLoteId);if(!l)return;
-  const cabAct=loteCabezasActuales(l);
-  const monto=parseFloat(document.getElementById('gl-monto').value)||0;
-  const porCab=cabAct>0?monto/cabAct:0;
-  document.getElementById('gl-calc').innerHTML=cabAct>0
-    ? `Se repartirá entre <strong>${cabAct}</strong> cabeza(s) = <strong>${fmt(porCab)}</strong> por cabeza.`
-    : `<span style="color:var(--red);">Este lote no tiene cabezas activas; no se puede repartir el gasto.</span>`;
-};
-function renderGastoLoteHistorial(l){
-  const cont=document.getElementById('gl-historial');if(!cont)return;
-  const gx=l.gastosExtra||[];
-  if(!gx.length){cont.innerHTML='';return;}
-  cont.innerHTML='<div class="sec-div">Gastos ya registrados en este lote</div>'+gx.slice().sort((a,b)=>(b.fecha||'').localeCompare(a.fecha||'')).map(g=>{
-    const porCab=g.cabezasEnMomento?g.monto/g.cabezasEnMomento:0;
-    return `<div style="display:flex;gap:8px;align-items:center;justify-content:space-between;padding:8px 10px;background:var(--fill-tertiary);border-radius:10px;margin-bottom:6px;font-size:12px;">
-      <div><strong>${fmt(g.monto)}</strong> · ${g.concepto||'Gasto'}<div style="color:var(--text3);">${g.fecha} · ${g.cabezasEnMomento} cab. (${fmt(porCab)}/cab.)</div></div>
-      <button class="btn-delete" onclick="deleteGastoLote('${l.id}','${g.id}')"><i class="ti ti-trash"></i></button>
-    </div>`;
-  }).join('');
-}
-window.saveGastoLote=async function(){
-  const l=DB.lotes.find(x=>x.id===gastoLoteId);if(!l)return;
-  const monto=parseFloat(document.getElementById('gl-monto').value)||0;
-  if(!monto){toast('Falta el monto');return;}
-  const cabAct=loteCabezasActuales(l);
-  if(cabAct<=0){toast('El lote no tiene cabezas activas');return;}
-  const g={
-    id:'gx_'+Date.now()+'_'+Math.floor(Math.random()*10000),
-    fecha:document.getElementById('gl-fecha').value||td(),
-    monto,
-    concepto:document.getElementById('gl-concepto').value.trim(),
-    notas:document.getElementById('gl-notas').value.trim(),
-    cabezasEnMomento:cabAct,
-    createdAt:Date.now()
-  };
-  const gastosExtra=[...(l.gastosExtra||[]),g];
-  await updateDoc(doc(db,'lotes',l.id),{gastosExtra,updatedAt:serverTimestamp()});
-  toast('Gasto agregado al lote');
-  window.closeModal('modal-gasto-lote');
+// ============== GASTO QUE SUBE EL COSTO BASE DEL LOTE (se reparte entre cabezas activas) ==============
+// El botón "Agregar gasto" de la tarjeta abre el formulario de gasto del ganado ya configurado
+// para sumar a la base del lote (mismo formulario, con el interruptor activado).
+window.openGastoBaseParaLote=function(loteId){
+  window.openGastoModal('ganado');
+  document.getElementById('modal-gasto-title').textContent='Agregar gasto al lote';
+  document.getElementById('g-lote').value=loteId;
+  document.getElementById('g-base-toggle').checked=true;
+  updateGastoBaseUI();
+  modalDirty['modal-gasto']=false;
 };
 window.deleteGastoLote=function(loteId,gxId){
   const l=DB.lotes.find(x=>x.id===loteId);if(!l)return;
-  confirmDialog('¿Eliminar gasto del lote?','Se quitará del capital invertido y del costo por cabeza.',async()=>{
+  confirmDialog('¿Eliminar gasto del lote?','Se quitará del capital invertido y del costo por cabeza del lote.',async()=>{
     const gastosExtra=(l.gastosExtra||[]).filter(g=>g.id!==gxId);
     await updateDoc(doc(db,'lotes',loteId),{gastosExtra,updatedAt:serverTimestamp()});
     toast('Gasto eliminado');
-    setTimeout(()=>{const lx=DB.lotes.find(x=>x.id===loteId);if(lx&&document.getElementById('modal-gasto-lote').classList.contains('open')){renderGastoLoteHistorial(lx);window.calcGastoLote();}},400);
   },'Eliminar');
 };
 
@@ -2461,6 +2405,7 @@ window.openGastoModal=function(prefillTipo){
   document.getElementById('g-estado').value='pagado';
   document.getElementById('g-vencimiento-wrap').style.display='none';
   document.getElementById('g-plazo-wrap').style.display='none';
+  document.getElementById('g-base-toggle').checked=false;
   window.onChangeGastoTipo();
   document.getElementById('modal-gasto').classList.add('open');
 };
@@ -2500,6 +2445,27 @@ window.onChangeGastoTipo=function(){
     const infoEl=document.getElementById('g-info-snapshot');
     if(infoEl)infoEl.style.display='none';
   }
+  updateGastoBaseUI();
+};
+// Muestra el interruptor "sumar a la base" solo para gasto de ganado asociado a un lote (registro nuevo),
+// oculta la sección de pago cuando está activo y calcula el reparto por cabeza en vivo.
+window.updateGastoBaseUI=function(){
+  const tipo=document.getElementById('g-tipo').value;
+  const loteId=document.getElementById('g-lote').value;
+  const show=tipo==='ganado'&&!!loteId&&!editingId.gastos;
+  document.getElementById('g-base-wrap').style.display=show?'block':'none';
+  if(!show)document.getElementById('g-base-toggle').checked=false;
+  const baseOn=show&&document.getElementById('g-base-toggle').checked;
+  document.getElementById('g-pago-section').style.display=baseOn?'none':'block';
+  const hint=document.getElementById('g-base-hint');
+  if(baseOn){
+    const l=DB.lotes.find(x=>x.id===loteId);
+    const cab=l?loteCabezasActuales(l):0;
+    const monto=parseFloat(document.getElementById('g-monto').value)||0;
+    hint.innerHTML=cab>0
+      ? `Se repartirá entre <strong>${cab}</strong> cabeza(s) activa(s) = <strong>${fmt(monto/cab)}</strong> por cabeza.`
+      : '<span style="color:var(--red);">El lote no tiene cabezas activas; no se puede repartir.</span>';
+  } else hint.innerHTML='';
 };
 window.onChangeGastoCat=function(){
   const v=document.getElementById('g-cat').value;
@@ -2566,6 +2532,32 @@ window.editGasto=function(id){
 };
 window.saveGasto=async function(){
   const tipo=document.getElementById('g-tipo').value;
+  // Rama "sube la base del lote": se guarda en el lote (gastosExtra), no como gasto operativo, para no contar doble.
+  const _loteSel=document.getElementById('g-lote').value||'';
+  const _baseOn=tipo==='ganado'&&_loteSel&&document.getElementById('g-base-toggle').checked&&!editingId.gastos;
+  if(_baseOn){
+    const _monto=parseFloat(document.getElementById('g-monto').value)||0;
+    if(!_monto){toast('Falta el monto');return;}
+    const l=DB.lotes.find(x=>x.id===_loteSel);if(!l){toast('Lote no encontrado');return;}
+    const cab=loteCabezasActuales(l);
+    if(cab<=0){toast('El lote no tiene cabezas activas para repartir el gasto');return;}
+    const g={
+      id:'gx_'+Date.now()+'_'+Math.floor(Math.random()*10000),
+      fecha:document.getElementById('g-fecha').value||td(),
+      monto:_monto,
+      concepto:document.getElementById('g-proveedor').value.trim()||document.getElementById('g-cat').value,
+      cat:document.getElementById('g-cat').value,
+      proveedor:document.getElementById('g-proveedor').value.trim(),
+      numFactura:document.getElementById('g-factura').value.trim(),
+      notas:document.getElementById('g-notas').value.trim(),
+      cabezasEnMomento:cab,
+      createdAt:Date.now()
+    };
+    await updateDoc(doc(db,'lotes',_loteSel),{gastosExtra:[...(l.gastosExtra||[]),g],updatedAt:serverTimestamp()});
+    toast('Gasto sumado al costo base del lote');
+    window.closeModal('modal-gasto');
+    return;
+  }
   const data={
     tipo,
     fecha:document.getElementById('g-fecha').value,
@@ -3138,7 +3130,7 @@ function renderGLotes(){
       ${cabAct>0?`<button class="btn btn-outline" onclick="openReclasModal('${l.id}')">Reclasificar</button>`:''}
       ${cabAct>0?`<button class="btn btn-outline" onclick="openPesajeModal('${l.id}')">+ Pesaje</button>`:''}
       ${cabAct>0?`<button class="btn-pink btn" onclick="openNacimientoModal('${l.id}')"><i class="ti ti-milk"></i> Nacimiento</button>`:''}
-      ${cabAct>0?`<button class="btn btn-outline" onclick="openGastoLoteModal('${l.id}')"><i class="ti ti-coins"></i> Agregar gasto</button>`:''}
+      ${cabAct>0?`<button class="btn btn-outline" onclick="openGastoBaseParaLote('${l.id}')"><i class="ti ti-coins"></i> Agregar gasto</button>`:''}
       ${atadosActivos.length>0?`<button class="btn btn-outline" onclick="openDestetarModal('${l.id}')">Destetar</button>`:''}
     </div></div>`;
     return html;

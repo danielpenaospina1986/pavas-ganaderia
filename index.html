@@ -1074,6 +1074,38 @@ function loteCostoDisponible(l){
   return (l.subcats||[]).reduce((s,sc)=>s+(sc.cabezas||0)*subcatCostoPorCabeza(l,sc),0);
 }
 
+// ===== FUENTE DE VERDAD DE DISPONIBLES =====
+// Recalcula las cabezas disponibles de cada LÍNEA DE COMPRA a partir de los registros inmutables
+// (ventas y reclasificaciones), en vez de confiar en el número guardado (que puede quedar descuadrado
+// al editar un lote). Las líneas de terneros (costo $0) y las creadas por reclasificación se dejan
+// tal cual, porque se gestionan con movimientos explícitos y no las afecta la edición de la compra.
+function reconciliarCabezas(loteId,subcats){
+  const subs=(subcats||[]).map((sc,i)=>({...sc,lineId:sc.lineId||('legacy_'+i)}));
+  const validLineIds=new Set(subs.map(s=>s.lineId));
+  const sold={};subs.forEach(s=>sold[s.lineId]=0);
+  DB.ventas.filter(v=>v.loteId===loteId).forEach(v=>{
+    (v.desglose||[]).forEach(d=>{
+      // 1) por lineId exacto; 2) por subcatId a una línea de compra; 3) por subcatId + costo-cero
+      let lineId=(d.lineId&&validLineIds.has(d.lineId))?d.lineId:null;
+      if(!lineId){const m=subs.find(s=>!s.reclasificada&&!s.costoCabezaCero&&s.subcatId===d.subcatId);lineId=m?m.lineId:null;}
+      if(!lineId){const m=subs.find(s=>s.subcatId===d.subcatId&&(!!s.costoCabezaCero)===(d.costoCabezaCero===true));lineId=m?m.lineId:null;}
+      if(lineId&&sold[lineId]!==undefined)sold[lineId]+=(d.cabezas||0);
+    });
+  });
+  const reclasOut={};
+  DB.reclasificaciones.filter(r=>r.loteId===loteId).forEach(r=>{reclasOut[r.origen]=(reclasOut[r.origen]||0)+(r.cabezas||0);});
+  return subs.map(sc=>{
+    if(sc.costoCabezaCero||sc.reclasificada)return sc; // gestionadas por movimientos, no se recalculan
+    let out=0;
+    if(reclasOut[sc.subcatId]>0){out=Math.min(reclasOut[sc.subcatId],sc.cabezasIni||0);reclasOut[sc.subcatId]-=out;}
+    return {...sc,cabezas:Math.max(0,(sc.cabezasIni||0)-(sold[sc.lineId]||0)-out)};
+  });
+}
+// Cuántas cabezas disponibles debería tener el lote según los registros (para detectar descuadres)
+function loteCabezasReconciliadas(l){
+  return reconciliarCabezas(l.id,l.subcats||[]).reduce((s,sc)=>s+(sc.cabezas||0),0);
+}
+
 // ============== HELPERS "NUESTRA PARTE" PARA AL PARTIR ==============
 // Devuelve qué fracción del rubro nos corresponde según el rol y tipo de movimiento.
 // rubro: 'ingreso' | 'costoCompra' | 'fleteVenta' | 'gastoGanado' | 'gastoOperativo'
@@ -1617,24 +1649,12 @@ window.saveLote=async function(){
     if(existing){
       if(existing.atados)data.atados=existing.atados;
       if(existing.gastosExtra)data.gastosExtra=existing.gastosExtra;
-      // Líneas que NO se editan aquí y se conservan intactas: terneros costo-cero y líneas de reclasificación
+      // Conservar intactas las líneas de terneros costo-cero y las creadas por reclasificación
       const preservadas=(existing.subcats||[]).filter(s=>s.costoCabezaCero||s.reclasificada);
-      const oldEditables=(existing.subcats||[]).filter(s=>!s.costoCabezaCero&&!s.reclasificada);
-      const usados=new Set();
-      // Reconciliar cabezas disponibles: conserva lo ya vendido/movido (o recibido) para NO tener que
-      // borrar y re-registrar ventas al editar valores del lote. neto = cabezas − cabezasIni del estado previo.
-      data.subcats=data.subcats.map(newSc=>{
-        let idx=newSc.lineId?oldEditables.findIndex((s,i)=>!usados.has(i)&&s.lineId===newSc.lineId):-1;
-        if(idx<0)idx=oldEditables.findIndex((s,i)=>!usados.has(i)&&s.subcatId===newSc.subcatId); // fallback datos viejos sin lineId
-        if(idx>=0){
-          usados.add(idx);
-          const old=oldEditables[idx];
-          const neto=(old.cabezas||0)-(old.cabezasIni||0); // <0: vendidas/movidas · >0: recibidas por reclas
-          newSc.cabezas=Math.max(0,(newSc.cabezasIni||0)+neto);
-        }
-        return newSc;
-      });
       data.subcats=[...data.subcats,...preservadas];
+      // Fuente de verdad: recalcular las disponibles desde las ventas/reclasificaciones registradas.
+      // Así editar valores del lote NUNCA descuadra el inventario (auto-sanación).
+      data.subcats=reconciliarCabezas(editingId.lotes,data.subcats);
     }
     await updateDoc(doc(db,'lotes',editingId.lotes),data);toast('Lote actualizado');
   } else {
@@ -1652,6 +1672,23 @@ window.deleteLote=function(loteId){
     await Promise.all([...vv.map(v=>deleteDoc(doc(db,'ventas',v.id))),...pp.map(p=>deleteDoc(doc(db,'pesajes',p.id))),...rr.map(r=>deleteDoc(doc(db,'reclasificaciones',r.id))),...nn.map(n=>deleteDoc(doc(db,'nacimientos',n.id)))]);
     toast('Lote eliminado');
   },'Eliminar');
+};
+
+// Repara el inventario de un lote cuyas disponibles guardadas no coinciden con las ventas registradas.
+window.recalcularDisponibles=function(loteId){
+  const l=DB.lotes.find(x=>x.id===loteId);if(!l)return;
+  const newSubcats=reconciliarCabezas(loteId,l.subcats||[]);
+  const antes=loteCabezasActuales(l);
+  const despues=newSubcats.reduce((s,sc)=>s+(sc.cabezas||0),0);
+  if(antes===despues){toast('Las disponibles ya están correctas');return;}
+  const ini=loteCabezasIni(l);
+  const vendidas=DB.ventas.filter(v=>v.loteId===loteId).reduce((s,v)=>s+((v.desglose||[]).reduce((a,d)=>a+(d.cabezas||0),0)),0);
+  confirmDialog('¿Recalcular cabezas disponibles?',
+    `Guardadas ahora: <strong>${antes}</strong><br>Reales según registros: <strong>${despues}</strong><br><br>Iniciales: <strong>${ini}</strong> · Vendidas: <strong>${vendidas}</strong>.<br><br>Se corregirá el inventario del lote a <strong>${despues}</strong> cabeza(s) disponible(s).`,
+    async()=>{
+      await updateDoc(doc(db,'lotes',loteId),{subcats:newSubcats,updatedAt:serverTimestamp()});
+      toast('Disponibles recalculadas');
+    },'Recalcular y corregir','btn-primary');
 };
 
 // ============== RECLASIFICAR ==============
@@ -3063,6 +3100,7 @@ function renderGLotes(){
     const total=loteTotalCompra(l);
     const peso=lotePesoTotal(l);
     const ultPes=loteUltimoPesaje(l);
+    const cabReal=loteCabezasReconciliadas(l); // disponibles según ventas/reclas registradas
     const ventasLote=DB.ventas.filter(v=>v.loteId===l.id);
     const gananciaAcum=ventasLote.reduce((s,v)=>s+((v.gananciaBruta||0)),0);
     
@@ -3084,6 +3122,7 @@ function renderGLotes(){
           <button class="btn-pdf" onclick="generarInformeLote('${l.id}')"><i class="ti ti-file-text"></i> PDF-Informe</button>
         </div>
       </div>
+      ${cabAct!==cabReal?`<div class="alert-box alert-warning" style="margin:6px 0;font-size:12px;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;"><span><i class="ti ti-alert-triangle"></i> Disponibles descuadradas: guardadas <strong>${cabAct}</strong>, reales según ventas <strong>${cabReal}</strong>.</span><button class="btn btn-primary" style="padding:6px 12px;font-size:12px;" onclick="recalcularDisponibles('${l.id}')">Recalcular</button></div>`:''}
       <div class="row"><div>Cabezas: <span>${cabAct}/${cabIni}</span></div>${atados>0?`<div><i class="ti ti-milk"></i> Atados: <span>${atados}</span></div>`:''}<div>Peso compra: <span>${fmtKg(peso)}</span></div>${ultPes?`<div>Peso actual: <span>${fmtKg(ultPes.promedio)}/cab. <span style="color:var(--text3);font-weight:400;">(${ultPes.fecha})</span></span></div>`:''}</div>
       <div class="row"><div>Valor ganado: <span>${fmt(valor)}</span></div><div>Flete: <span>${fmt(l.flete||0)}</span></div><div>Total: <span>${fmt(total)}</span></div></div>
       ${peso>0?`<div class="row"><div>Costo real/kg: <span>${fmtP(total/peso)}</span></div>${cabAct>0?`<div>Costo cabezas disponibles: <span>${fmt(loteCostoDisponible(l))}</span></div>`:''}</div>`:(cabAct>0?`<div class="row"><div>Costo cabezas disponibles: <span>${fmt(loteCostoDisponible(l))}</span></div></div>`:'')}`;
